@@ -41,6 +41,8 @@ type CreateReleaseDTO struct {
 	Status          string      `json:"status"` // <- NOVO: "revisao" | "producao" | "descontinuado"
 	Modules         []ModuleDTO `json:"modules"`
 	Entries         []EntryDTO  `json:"entries"`
+	ProductCategory string      `json:"productCategory"`
+	ProductName     string      `json:"productName"`
 }
 
 /*
@@ -77,7 +79,9 @@ type ReleaseResponse struct {
 	OTAObs          string                 `json:"otaObs,omitempty"`
 	ReleaseDate     time.Time              `json:"releaseDate"`
 	ImportantNote   string                 `json:"importantNote,omitempty"`
-	Status          string                 `json:"status"` // <- NOVO
+	ProductCategory string                 `json:"productCategory"`
+	ProductName     string                 `json:"productName"`
+	Status          string                 `json:"status"`
 	CreatedBy       *UserPublic            `json:"createdBy,omitempty"`
 	Modules         []ReleaseModulePublic  `json:"modules,omitempty"`
 	Entries         []ChangelogEntryPublic `json:"entries,omitempty"`
@@ -147,12 +151,14 @@ func toReleaseResponse(m *models.Release) ReleaseResponse {
 	return ReleaseResponse{
 		ID: m.ID, Version: m.Version, PreviousVersion: m.PreviousVersion,
 		OTA: m.OTA, OTAObs: m.OTAObs, ReleaseDate: m.ReleaseDate,
-		ImportantNote: m.ImportantNote,
-		Status:        string(m.Status), // <- NOVO
-		CreatedBy:     toPublicUser(m.CreatedBy),
-		Modules:       toPublicModules(m.Modules),
-		Entries:       toPublicEntries(m.Entries),
-		CreatedAt:     m.CreatedAt, UpdatedAt: m.UpdatedAt,
+		ImportantNote:   m.ImportantNote,
+		ProductCategory: m.ProductCategory,
+		ProductName:     m.ProductName,
+		Status:          string(m.Status), // <- NOVO
+		CreatedBy:       toPublicUser(m.CreatedBy),
+		Modules:         toPublicModules(m.Modules),
+		Entries:         toPublicEntries(m.Entries),
+		CreatedAt:       m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}
 }
 
@@ -195,7 +201,9 @@ func (h ReleaseHandler) Create(c *gin.Context) {
 		OTAObs:          in.OTAObs,
 		ReleaseDate:     in.ReleaseDate,
 		ImportantNote:   in.ImportantNote,
-		Status:          st, // <- NOVO
+		ProductCategory: in.ProductCategory, // novo
+		ProductName:     in.ProductName,     // novo
+		Status:          st,                 // <- NOVO
 		Modules:         toModelModules(in.Modules),
 		Entries:         toModelEntries(in.Entries),
 		CreatedByUserID: userID,
@@ -281,6 +289,8 @@ func (h ReleaseHandler) Update(c *gin.Context) {
 		ReleaseDate:     in.ReleaseDate,
 		ImportantNote:   in.ImportantNote,
 		Status:          st,
+		ProductCategory: in.ProductCategory,
+		ProductName:     in.ProductName,
 		// crítico: manter o criador original
 		CreatedByUserID: cur.CreatedByUserID,
 	}

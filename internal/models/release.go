@@ -29,11 +29,10 @@ type Release struct {
 	OTA             bool
 	OTAObs          string `gorm:"size:255"`
 	ReleaseDate     time.Time
-	ImportantNote   string `gorm:"type:text"`
-
-	// NOVO
-	Status FirmwareStatus `json:"status" gorm:"type:varchar(20);default:producao;index"`
-
+	ImportantNote   string           `gorm:"type:text"`
+	ProductCategory string           `json:"productCategory" gorm:"size:60;index"`
+	ProductName     string           `json:"productName"     gorm:"size:120;index"`
+	Status          FirmwareStatus   `json:"status" gorm:"type:varchar(20);default:producao;index"`
 	CreatedByUserID uint             `json:"-"`
 	CreatedBy       *User            `json:"createdBy,omitempty" gorm:"foreignKey:CreatedByUserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 	Modules         []ReleaseModule  `gorm:"constraint:OnDelete:CASCADE"`
