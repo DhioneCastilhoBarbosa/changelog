@@ -1,0 +1,11 @@
+[phases.setup]
+nixpkgs = ["go"]
+
+[phases.install]
+cmds = ["go mod download"]
+
+[phases.build]
+cmds = ["go build -o app ./cmd/server"]
+
+[start]
+cmd = "./app"
