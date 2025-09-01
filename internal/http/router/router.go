@@ -2,6 +2,7 @@
 package router
 
 import (
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
@@ -13,6 +14,15 @@ import (
 
 func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
 	r := gin.Default()
+
+	// CORS config
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"}, // ajuste conforme necessário
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+	}))
 
 	// repos
 	relRepo := repository.NewReleaseRepository(db)
