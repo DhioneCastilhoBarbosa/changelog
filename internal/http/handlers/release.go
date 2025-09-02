@@ -259,19 +259,21 @@ func (h ReleaseHandler) List(c *gin.Context) {
 func (h ReleaseHandler) Update(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 
-	// 1) carrega o atual para preservar o criador
+	// 1) Carrega o atual para preservar campos imutáveis
 	cur, err := h.Svc.Get(uint(id))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "release não encontrado"})
 		return
 	}
 
+	// 2) Bind do payload (sem timestamps)
 	var in CreateReleaseDTO
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	// 3) Valida status
 	st := models.FirmwareStatus(in.Status)
 	if st == "" {
 		st = models.FirmwareStatusProducao
@@ -281,27 +283,39 @@ func (h ReleaseHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// 4) Monta base preservando quem não deve mudar
 	base := models.Release{
-		Version:         in.Version,
-		PreviousVersion: in.PreviousVersion,
-		OTA:             in.OTA,
-		OTAObs:          in.OTAObs,
-		ReleaseDate:     in.ReleaseDate,
-		ImportantNote:   in.ImportantNote,
-		Status:          st,
-		ProductCategory: in.ProductCategory,
-		ProductName:     in.ProductName,
-		// crítico: manter o criador original
-		CreatedByUserID: cur.CreatedByUserID,
+		ID:               cur.ID,              // garante PK correta
+		Version:          in.Version,
+		PreviousVersion:  in.PreviousVersion,
+		OTA:              in.OTA,
+		OTAObs:           in.OTAObs,
+		ReleaseDate:      in.ReleaseDate,
+		ImportantNote:    in.ImportantNote,
+		Status:           st,
+		ProductCategory:  in.ProductCategory,
+		ProductName:      in.ProductName,
+
+		CreatedByUserID:  cur.CreatedByUserID, // PRESERVA criador
+		CreatedAt:        cur.CreatedAt,       // PRESERVA CreatedAt
+		// UpdatedAt: deixe o GORM atualizar sozinho
 	}
 
-	out, err := h.Svc.UpdateFull(uint(id), base, toModelModules(in.Modules), toModelEntries(in.Entries))
+	// 5) Atualiza
+	out, err := h.Svc.UpdateFull(
+		uint(id),
+		base,
+		toModelModules(in.Modules),
+		toModelEntries(in.Entries),
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
 	c.JSON(http.StatusOK, toReleaseResponse(out))
 }
+
 
 func (h ReleaseHandler) Delete(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
