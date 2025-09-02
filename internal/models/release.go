@@ -28,7 +28,7 @@ type Release struct {
 	PreviousVersion string `gorm:"size:32"`
 	OTA             bool
 	OTAObs          string `gorm:"size:255"`
-	ReleaseDate     time.Time
+	ReleaseDate     time.Time `json:"releaseDate" gorm:"index"`
 	ImportantNote   string           `gorm:"type:text"`
 	ProductCategory string           `json:"productCategory" gorm:"size:60;index"`
 	ProductName     string           `json:"productName"     gorm:"size:120;index"`
@@ -37,6 +37,6 @@ type Release struct {
 	CreatedBy       *User            `json:"createdBy,omitempty" gorm:"foreignKey:CreatedByUserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 	Modules         []ReleaseModule  `gorm:"constraint:OnDelete:CASCADE"`
 	Entries         []ChangelogEntry `gorm:"constraint:OnDelete:CASCADE"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	CreatedAt       time.Time         `json:"createdAt" gorm:"autoCreateTime"`
+	UpdatedAt       time.Time         `json:"updatedAt" gorm:"autoUpdateTime"`
 }
