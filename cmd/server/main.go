@@ -35,6 +35,7 @@ func main() {
 		&models.Release{},
 		&models.ReleaseModule{},
 		&models.ChangelogEntry{},
+		&models.FirmwareLink{},
 	); err != nil {
 		log.Fatal(err)
 	}
