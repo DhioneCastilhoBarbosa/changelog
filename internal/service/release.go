@@ -54,7 +54,7 @@ func (s *ReleaseService) UpdateFull(id uint, base models.Release, modules []mode
 		return nil, err
 	}
 	// Substitui relações
-	return s.repo.ReplaceRelations(id, modules, entries)
+	return s.repo.ReplaceRelations(id, modules, entries, links)
 }
 
 func (s *ReleaseService) Delete(id uint) error {
