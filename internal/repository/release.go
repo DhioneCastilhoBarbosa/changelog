@@ -19,7 +19,7 @@ type ReleaseRepository interface {
 	Create(r *models.Release) error
 	GetByID(id uint) (*models.Release, error)
 	List(f ReleaseFilter) ([]models.Release, error)
-	ReplaceRelations(id uint, modules []models.ReleaseModule, entries []models.ChangelogEntry) (*models.Release, error)
+	ReplaceRelations(id uint, modules []models.ReleaseModule, entries []models.ChangelogEntry, links []models.FirmwareLink) (*models.Release, error)
 	UpdateBaseFields(r *models.Release) error
 	Delete(id uint) error
 }
@@ -41,6 +41,7 @@ func (r *releaseRepository) GetByID(id uint) (*models.Release, error) {
 	err := r.db.
 		Preload("Modules").
 		Preload("Entries", func(tx *gorm.DB) *gorm.DB { return tx.Order("item_order ASC") }).
+		 Preload("Links", func(tx *gorm.DB) *gorm.DB { return tx.Order("module ASC, id ASC") }).
 		First(&out, id).Error
 	if err != nil {
 		return nil, err
@@ -52,20 +53,27 @@ func (r *releaseRepository) List(f ReleaseFilter) ([]models.Release, error) {
 	tx := r.db.Model(&models.Release{}).
 		Preload("Modules").
 		Preload("Entries", func(tx *gorm.DB) *gorm.DB { return tx.Order("item_order ASC") }).
+		Preload("Links", func(tx *gorm.DB) *gorm.DB { return tx.Order("module ASC, id ASC") }).
 		Order("release_date DESC")
 
 	if f.Version != "" {
 		tx = tx.Where("version = ?", f.Version)
 	}
 	if f.Q != "" {
-		like := "%" + f.Q + "%"
-		tx = tx.Where(
-			r.db.Where("version ILIKE ?", like).
-				Or("previous_version ILIKE ?", like).
-				Or("ota_obs ILIKE ?", like).
-				Or("important_note ILIKE ?", like),
-		)
-	}
+    like := "%" + f.Q + "%"
+    tx = tx.Where(
+        r.db.Where("version ILIKE ?", like).
+            Or("previous_version ILIKE ?", like).
+            Or("ota_obs ILIKE ?", like).
+            Or("important_note ILIKE ?", like).
+            Or(`EXISTS (
+                SELECT 1 FROM firmware_links fl
+                WHERE fl.release_id = releases.id
+                  AND (fl.module ILIKE ? OR fl.description ILIKE ? OR fl.url ILIKE ?)
+            )`, like, like, like),
+    )
+}
+
 	if f.DateFrom != nil {
 		tx = tx.Where("release_date >= ?", *f.DateFrom)
 	}
@@ -85,7 +93,7 @@ func (r *releaseRepository) UpdateBaseFields(rel *models.Release) error {
 }
 
 // Estratégia “replace-all” para Modules e Entries
-func (r *releaseRepository) ReplaceRelations(id uint, modules []models.ReleaseModule, entries []models.ChangelogEntry) (*models.Release, error) {
+func (r *releaseRepository) ReplaceRelations(id uint, modules []models.ReleaseModule, entries []models.ChangelogEntry, links []models.FirmwareLink,) (*models.Release, error) {
 	tx := r.db.Begin()
 
 	if err := tx.Where("release_id = ?", id).Delete(&models.ReleaseModule{}).Error; err != nil {
@@ -97,11 +105,16 @@ func (r *releaseRepository) ReplaceRelations(id uint, modules []models.ReleaseMo
 		return nil, err
 	}
 
+	if err := tx.Where("release_id = ?", id).Delete(&models.FirmwareLink{}).Error; err != nil { tx.Rollback(); return nil, err } 
+
 	for i := range modules {
 		modules[i].ReleaseID = id
 	}
 	for i := range entries {
 		entries[i].ReleaseID = id
+	}
+	for i := range links {
+		links[i].ReleaseID = id
 	}
 
 	if len(modules) > 0 {
@@ -116,6 +129,9 @@ func (r *releaseRepository) ReplaceRelations(id uint, modules []models.ReleaseMo
 			return nil, err
 		}
 	}
+
+	if len(links) > 0   { if err := tx.Create(&links).Error;   err != nil { tx.Rollback(); return nil, err } }
+
 
 	if err := tx.Commit().Error; err != nil {
 		return nil, err
