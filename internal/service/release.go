@@ -47,7 +47,7 @@ func (s *ReleaseService) List(q ReleaseQuery) ([]models.Release, error) {
 	return s.repo.List(f)
 }
 
-func (s *ReleaseService) UpdateFull(id uint, base models.Release, modules []models.ReleaseModule, entries []models.ChangelogEntry) (*models.Release, error) {
+func (s *ReleaseService) UpdateFull(id uint, base models.Release, modules []models.ReleaseModule, entries []models.ChangelogEntry, links []models.FirmwareLink,) (*models.Release, error) {
 	// Atualiza campos simples
 	base.ID = id
 	if err := s.repo.UpdateBaseFields(&base); err != nil {

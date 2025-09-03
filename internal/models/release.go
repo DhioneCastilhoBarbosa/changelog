@@ -37,6 +37,19 @@ type Release struct {
 	CreatedBy       *User            `json:"createdBy,omitempty" gorm:"foreignKey:CreatedByUserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 	Modules         []ReleaseModule  `gorm:"constraint:OnDelete:CASCADE"`
 	Entries         []ChangelogEntry `gorm:"constraint:OnDelete:CASCADE"`
+	Links          []FirmwareLink    `gorm:"constraint:OnDelete:CASCADE"`
 	CreatedAt       time.Time         `json:"createdAt" gorm:"autoCreateTime"`
 	UpdatedAt       time.Time         `json:"updatedAt" gorm:"autoUpdateTime"`
 }
+
+type FirmwareLink struct {
+	ID        uint      `gorm:"primaryKey"`
+	ReleaseID uint      `gorm:"index"`
+	Module    string    `gorm:"size:120;not null"`
+	Description string  `gorm:"size:255;not null"`
+	URL       string    `gorm:"size:2048;not null"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+

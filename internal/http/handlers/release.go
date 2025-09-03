@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -18,9 +19,15 @@ type ReleaseHandler struct {
 /*
 =========================
 
-	DTOs de entrada (como já tinha)
+	DTOs de entrada 
 	=========================
 */
+type FirmwareLinkDTO struct {
+	Module      string `json:"module" binding:"required"`
+	Description string `json:"description" binding:"required"`
+	URL         string `json:"url" binding:"required"`
+}
+
 type ModuleDTO struct {
 	Module  string `json:"module"`
 	Version string `json:"version"`
@@ -41,6 +48,7 @@ type CreateReleaseDTO struct {
 	Status          string      `json:"status"` // <- NOVO: "revisao" | "producao" | "descontinuado"
 	Modules         []ModuleDTO `json:"modules"`
 	Entries         []EntryDTO  `json:"entries"`
+	Links           []FirmwareLinkDTO `json:"links"` // <- NOVO
 	ProductCategory string      `json:"productCategory"`
 	ProductName     string      `json:"productName"`
 }
@@ -51,6 +59,14 @@ type CreateReleaseDTO struct {
 	DTOs de saída (seguros)
 	=========================
 */
+
+type ReleaseLinkPublic struct {
+	ID          uint   `json:"id"`
+	Module      string `json:"module"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+}
+
 type UserPublic struct {
 	ID   uint   `json:"id"`
 	Name string `json:"name"`
@@ -85,6 +101,7 @@ type ReleaseResponse struct {
 	CreatedBy       *UserPublic            `json:"createdBy,omitempty"`
 	Modules         []ReleaseModulePublic  `json:"modules,omitempty"`
 	Entries         []ChangelogEntryPublic `json:"entries,omitempty"`
+	Links          []ReleaseLinkPublic     `json:"links,omitempty"` // <- NOVO
 	CreatedAt       time.Time              `json:"createdAt"`
 	UpdatedAt       time.Time              `json:"updatedAt"`
 }
@@ -95,6 +112,29 @@ type ReleaseResponse struct {
 	Mapeadores
 	=========================
 */
+
+func toModelLinks(ls []FirmwareLinkDTO) []models.FirmwareLink {
+	out := make([]models.FirmwareLink, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, models.FirmwareLink{
+			Module:      l.Module,
+			Description: l.Description,
+			URL:         l.URL,
+		})
+	}
+	return out
+}
+
+func toPublicLinks(ls []models.FirmwareLink) []ReleaseLinkPublic {
+	out := make([]ReleaseLinkPublic, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, ReleaseLinkPublic{
+			ID: l.ID, Module: l.Module, Description: l.Description, URL: l.URL,
+		})
+	}
+	return out
+}
+
 func toModelModules(ms []ModuleDTO) []models.ReleaseModule {
 	out := make([]models.ReleaseModule, 0, len(ms))
 	for _, m := range ms {
@@ -158,6 +198,7 @@ func toReleaseResponse(m *models.Release) ReleaseResponse {
 		CreatedBy:       toPublicUser(m.CreatedBy),
 		Modules:         toPublicModules(m.Modules),
 		Entries:         toPublicEntries(m.Entries),
+		Links:           toPublicLinks(m.Links), // <- NOVO
 		CreatedAt:       m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}
 }
@@ -173,22 +214,21 @@ func (h ReleaseHandler) Create(c *gin.Context) {
 		return
 	}
 
-	uidVal, ok := c.Get("userID")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"})
-		return
-	}
-	userID, ok := uidVal.(uint)
-	if !ok || userID == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
-		return
+	// valida URL básica
+	for i, l := range in.Links {
+		if _, err := url.ParseRequestURI(l.URL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "link inválido na posição " + strconv.Itoa(i)})
+			return
+		}
 	}
 
-	// validar status
+	uidVal, ok := c.Get("userID")
+	if !ok { c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"}); return }
+	userID, ok := uidVal.(uint)
+	if !ok || userID == 0 { c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"}); return }
+
 	st := models.FirmwareStatus(in.Status)
-	if st == "" {
-		st = models.FirmwareStatusProducao
-	}
+	if st == "" { st = models.FirmwareStatusProducao }
 	if !st.Valid() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: use revisao|producao|descontinuado"})
 		return
@@ -201,21 +241,20 @@ func (h ReleaseHandler) Create(c *gin.Context) {
 		OTAObs:          in.OTAObs,
 		ReleaseDate:     in.ReleaseDate,
 		ImportantNote:   in.ImportantNote,
-		ProductCategory: in.ProductCategory, // novo
-		ProductName:     in.ProductName,     // novo
-		Status:          st,                 // <- NOVO
+		ProductCategory: in.ProductCategory,
+		ProductName:     in.ProductName,
+		Status:          st,
 		Modules:         toModelModules(in.Modules),
 		Entries:         toModelEntries(in.Entries),
+		Links:           toModelLinks(in.Links), // <- NOVO
 		CreatedByUserID: userID,
 	}
 
 	out, err := h.Svc.Create(rel)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return }
 	c.JSON(http.StatusCreated, toReleaseResponse(out))
 }
+
 
 func (h ReleaseHandler) Get(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
@@ -258,63 +297,54 @@ func (h ReleaseHandler) List(c *gin.Context) {
 
 func (h ReleaseHandler) Update(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
-
-	// 1) Carrega o atual para preservar campos imutáveis
 	cur, err := h.Svc.Get(uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "release não encontrado"})
-		return
-	}
+	if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": "release não encontrado"}); return }
 
-	// 2) Bind do payload (sem timestamps)
 	var in CreateReleaseDTO
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// 3) Valida status
-	st := models.FirmwareStatus(in.Status)
-	if st == "" {
-		st = models.FirmwareStatusProducao
+	for i, l := range in.Links {
+		if _, err := url.ParseRequestURI(l.URL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "link inválido na posição " + strconv.Itoa(i)})
+			return
+		}
 	}
+
+	st := models.FirmwareStatus(in.Status)
+	if st == "" { st = models.FirmwareStatusProducao }
 	if !st.Valid() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: use revisao|producao|descontinuado"})
 		return
 	}
 
-	// 4) Monta base preservando quem não deve mudar
 	base := models.Release{
-		ID:               cur.ID,              // garante PK correta
-		Version:          in.Version,
-		PreviousVersion:  in.PreviousVersion,
-		OTA:              in.OTA,
-		OTAObs:           in.OTAObs,
-		ReleaseDate:      in.ReleaseDate,
-		ImportantNote:    in.ImportantNote,
-		Status:           st,
-		ProductCategory:  in.ProductCategory,
-		ProductName:      in.ProductName,
-
-		CreatedByUserID:  cur.CreatedByUserID, // PRESERVA criador
-		CreatedAt:        cur.CreatedAt,       // PRESERVA CreatedAt
-		// UpdatedAt: deixe o GORM atualizar sozinho
+		ID:              cur.ID,
+		Version:         in.Version,
+		PreviousVersion: in.PreviousVersion,
+		OTA:             in.OTA,
+		OTAObs:          in.OTAObs,
+		ReleaseDate:     in.ReleaseDate,
+		ImportantNote:   in.ImportantNote,
+		Status:          st,
+		ProductCategory: in.ProductCategory,
+		ProductName:     in.ProductName,
+		CreatedByUserID: cur.CreatedByUserID,
+		CreatedAt:       cur.CreatedAt,
 	}
 
-	// 5) Atualiza
 	out, err := h.Svc.UpdateFull(
 		uint(id),
 		base,
 		toModelModules(in.Modules),
 		toModelEntries(in.Entries),
+		toModelLinks(in.Links), // <- NOVO
 	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
+	if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return }
 	c.JSON(http.StatusOK, toReleaseResponse(out))
 }
+
 
 
 func (h ReleaseHandler) Delete(c *gin.Context) {
