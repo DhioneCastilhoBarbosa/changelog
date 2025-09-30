@@ -1,15 +1,12 @@
 package handlers
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -30,14 +27,14 @@ import (
 */
 
 type ReleaseHandler struct {
-	Svc *service.ReleaseService
-
-	// Config do file-server para upload
-	FileServerBase string // ex: "https://file-serve.api-castilho.com.br/firmware/"
-	FileServerUser string // se usar auth básica
-	FileServerPass string
-	HTTPTimeout    time.Duration // 0 => 120s
+    Svc *service.ReleaseService
+    // Base local que corresponde a /firmware (não adicione “firmware” depois)
+    // Ex.: "/files/firmware"  (montado via volume)
+    FileLocalRoot string
+    FilePublicBase string // ex.: "https://file-serve.api-castilho.com.br/firmware/"
+    HTTPTimeout time.Duration
 }
+
 type FirmwareLinkDTO struct {
 	Module      string `json:"module" binding:"required"`
 	Description string `json:"description" binding:"required"`
@@ -237,7 +234,7 @@ func (c *countReader) Read(p []byte) (int, error) {
 	n, err := c.R.Read(p); c.N += int64(n); return n, err
 }
 
-func (h ReleaseHandler) putToFileServer(ctx context.Context, filename, dir string, r io.Reader) (publicURL, mimeType, sha256sum string, size int64, err error) {
+/*func (h ReleaseHandler) putToFileServer(ctx context.Context, filename, dir string, r io.Reader) (publicURL, mimeType, sha256sum string, size int64, err error) {
 	if h.FileServerBase == "" {
 		return "", "", "", 0, fmt.Errorf("file-server não configurado")
 	}
@@ -279,7 +276,56 @@ func (h ReleaseHandler) putToFileServer(ctx context.Context, filename, dir strin
 	}
 
 	return dest, mt, "sha256:"+hex.EncodeToString(hh.Sum(nil)), cr.N, nil
+}*/
+
+// constrói URL pública com base + dir + filename
+func (h ReleaseHandler) makePublicURL(dir, filename string) string {
+    base := strings.TrimRight(h.FilePublicBase, "/") + "/"
+    if dir != "" {
+        return base + url.PathEscape(dir) + "/" + url.PathEscape(filename)
+    }
+    return base + url.PathEscape(filename)
 }
+
+// salva no FS local: <FileLocalRoot>/firmware[/dir]/filename
+func (h ReleaseHandler) saveToLocal(filename, dir string, r io.Reader) (publicURL string, size int64, err error) {
+    if h.FileLocalRoot == "" {
+        return "", 0, fmt.Errorf("FileLocalRoot não configurado")
+    }
+    root := strings.TrimRight(h.FileLocalRoot, "/")
+
+    // dir opcional: "AC", "DC/MODELOX", etc.
+    if dir != "" {
+        if dir, err = sanitizeRel(dir); err != nil {
+            return "", 0, err
+        }
+    }
+
+    // Base já é a pasta /firmware
+    destDir := root
+    if dir != "" {
+        destDir = filepath.Join(destDir, filepath.FromSlash(dir))
+    }
+    if err := os.MkdirAll(destDir, 0o775); err != nil {
+        return "", 0, fmt.Errorf("falha ao criar diretório: %w", err)
+    }
+
+    destPath := filepath.Join(destDir, filepath.Base(filename))
+    f, err := os.Create(destPath)
+    if err != nil {
+        return "", 0, fmt.Errorf("falha ao criar arquivo: %w", err)
+    }
+    defer f.Close()
+
+    n, err := io.Copy(f, r)
+    if err != nil {
+        return "", 0, fmt.Errorf("falha ao gravar arquivo: %w", err)
+    }
+
+    return h.makePublicURL(dir, filepath.Base(filename)), n, nil
+}
+
+
 
 /* =========================
    Handlers
@@ -385,11 +431,12 @@ func (h ReleaseHandler) Create(c *gin.Context) {
 			}
 			defer f.Close()
 
-			publicURL, _, _, _, err := h.putToFileServer(c.Request.Context(), filename, dir, f)
+			publicURL, _, err := h.saveToLocal(filename, dir, f)
 			if err != nil {
-				c.JSON(http.StatusBadGateway, gin.H{"error": "upload falhou: " + err.Error()})
-				return
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "upload falhou: " + err.Error()})
+					return
 			}
+
 
 			links = append(links, models.FirmwareLink{
 				Module:      linkModule,

@@ -43,13 +43,11 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
 	// handlers
 	auth := handlers.AuthHandler{Svc: authSvc}
 	rel := handlers.ReleaseHandler{
-		Svc:            relSvc,
-		// Base do file-server deve terminar com "/"
-		FileServerBase: envOr("FILE_SERVER_BASE", "https://file-serve.api-castilho.com.br/firmware/"),
-		FileServerUser: os.Getenv("FILE_SERVER_USER"), // se usar auth básica no Nginx
-		FileServerPass: os.Getenv("FILE_SERVER_PASS"),
-		HTTPTimeout:    120 * time.Second,
-	}
+    Svc:            relSvc,
+    FileLocalRoot:  envOr("FILE_LOCAL_ROOT", "/files/firmware"),
+    FilePublicBase: envOr("FILE_PUBLIC_BASE", "https://file-serve.api-castilho.com.br/firmware/"),
+}
+
 	user := handlers.UserHandler{Svc: userSvc}
 
 	// auth pública
