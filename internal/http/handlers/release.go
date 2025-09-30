@@ -1,9 +1,19 @@
 package handlers
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,16 +22,22 @@ import (
 	"github.com/DhioneCastilhoBarbosa/firmware-changelog/internal/service"
 )
 
-type ReleaseHandler struct {
-	Svc *service.ReleaseService
-}
-
 /*
 =========================
 
-	DTOs de entrada 
+	DTOs de entrada
 	=========================
 */
+
+type ReleaseHandler struct {
+	Svc *service.ReleaseService
+
+	// Config do file-server para upload
+	FileServerBase string // ex: "https://file-serve.api-castilho.com.br/firmware/"
+	FileServerUser string // se usar auth básica
+	FileServerPass string
+	HTTPTimeout    time.Duration // 0 => 120s
+}
 type FirmwareLinkDTO struct {
 	Module      string `json:"module" binding:"required"`
 	Description string `json:"description" binding:"required"`
@@ -203,56 +219,207 @@ func toReleaseResponse(m *models.Release) ReleaseResponse {
 	}
 }
 
+/* ===== Helpers de upload ===== */
+
+func sanitizeRel(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" { return "", nil }
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = path.Clean("/" + p)
+	if strings.Contains(p, "..") {
+		return "", fmt.Errorf("caminho inválido")
+	}
+	return strings.Trim(p, "/"), nil
+}
+
+type countReader struct{ R io.Reader; N int64 }
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.R.Read(p); c.N += int64(n); return n, err
+}
+
+func (h ReleaseHandler) putToFileServer(ctx context.Context, filename, dir string, r io.Reader) (publicURL, mimeType, sha256sum string, size int64, err error) {
+	if h.FileServerBase == "" {
+		return "", "", "", 0, fmt.Errorf("file-server não configurado")
+	}
+	base := h.FileServerBase
+	if !strings.HasSuffix(base, "/") { base += "/" }
+
+	if dir != "" {
+		if dir, err = sanitizeRel(dir); err != nil { return "", "", "", 0, err }
+	}
+
+	dest := base
+	if dir != "" { dest += url.PathEscape(dir) + "/" }
+	dest += url.PathEscape(filepath.Base(filename))
+
+	mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
+	if mt == "" { mt = "application/octet-stream" }
+
+	hh := sha256.New()
+	cr := &countReader{R: r}
+	body := io.TeeReader(cr, hh)
+
+	to := h.HTTPTimeout
+	if to == 0 { to = 120 * time.Second }
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, dest, body)
+	if err != nil { return "", "", "", 0, err }
+	req.Header.Set("Content-Type", mt)
+	if h.FileServerUser != "" {
+		req.SetBasicAuth(h.FileServerUser, h.FileServerPass)
+	}
+
+	resp, err := (&http.Client{Timeout: to}).Do(req)
+	if err != nil { return "", "", "", 0, err }
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", "", "", 0, fmt.Errorf("file-server %d: %s", resp.StatusCode, string(b))
+	}
+
+	return dest, mt, "sha256:"+hex.EncodeToString(hh.Sum(nil)), cr.N, nil
+}
+
 /* =========================
    Handlers
    ========================= */
 
 func (h ReleaseHandler) Create(c *gin.Context) {
-	var in CreateReleaseDTO
-	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+	ct := c.ContentType()
 
-	// valida URL básica
-	for i, l := range in.Links {
-		if _, err := url.ParseRequestURI(l.URL); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "link inválido na posição " + strconv.Itoa(i)})
+	// JSON puro: comportamento atual
+	if strings.HasPrefix(ct, "application/json") {
+		var in CreateReleaseDTO
+		if err := c.ShouldBindJSON(&in); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-	}
+		for i, l := range in.Links {
+			if _, err := url.ParseRequestURI(l.URL); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "link inválido na posição " + strconv.Itoa(i)})
+				return
+			}
+		}
 
-	uidVal, ok := c.Get("userID")
-	if !ok { c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"}); return }
-	userID, ok := uidVal.(uint)
-	if !ok || userID == 0 { c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"}); return }
+		uidVal, ok := c.Get("userID")
+		if !ok { c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"}); return }
+		userID, ok := uidVal.(uint)
+		if !ok || userID == 0 { c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"}); return }
 
-	st := models.FirmwareStatus(in.Status)
-	if st == "" { st = models.FirmwareStatusProducao }
-	if !st.Valid() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: use revisao|producao|descontinuado"})
+		st := models.FirmwareStatus(in.Status)
+		if st == "" { st = models.FirmwareStatusProducao }
+		if !st.Valid() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: use revisao|producao|descontinuado"})
+			return
+		}
+
+		rel := &models.Release{
+			Version:         in.Version,
+			PreviousVersion: in.PreviousVersion,
+			OTA:             in.OTA,
+			OTAObs:          in.OTAObs,
+			ReleaseDate:     in.ReleaseDate,
+			ImportantNote:   in.ImportantNote,
+			ProductCategory: in.ProductCategory,
+			ProductName:     in.ProductName,
+			Status:          st,
+			Modules:         toModelModules(in.Modules),
+			Entries:         toModelEntries(in.Entries),
+			Links:           toModelLinks(in.Links),
+			CreatedByUserID: userID,
+		}
+		out, err := h.Svc.Create(rel)
+		if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return }
+		c.JSON(http.StatusCreated, toReleaseResponse(out))
 		return
 	}
 
-	rel := &models.Release{
-		Version:         in.Version,
-		PreviousVersion: in.PreviousVersion,
-		OTA:             in.OTA,
-		OTAObs:          in.OTAObs,
-		ReleaseDate:     in.ReleaseDate,
-		ImportantNote:   in.ImportantNote,
-		ProductCategory: in.ProductCategory,
-		ProductName:     in.ProductName,
-		Status:          st,
-		Modules:         toModelModules(in.Modules),
-		Entries:         toModelEntries(in.Entries),
-		Links:           toModelLinks(in.Links), // <- NOVO
-		CreatedByUserID: userID,
+	// multipart/form-data: JSON no campo "data" + arquivo opcional no campo "file"
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		var in CreateReleaseDTO
+		raw := c.PostForm("data")
+		if raw == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "campo 'data' (JSON) obrigatório no multipart"})
+			return
+		}
+		if err := json.Unmarshal([]byte(raw), &in); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "JSON inválido em 'data': " + err.Error()})
+			return
+		}
+
+		uidVal, ok := c.Get("userID")
+		if !ok { c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"}); return }
+		userID, ok := uidVal.(uint)
+		if !ok || userID == 0 { c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"}); return }
+
+		st := models.FirmwareStatus(in.Status)
+		if st == "" { st = models.FirmwareStatusProducao }
+		if !st.Valid() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status inválido: use revisao|producao|descontinuado"})
+			return
+		}
+
+		// valida links já presentes
+		for i, l := range in.Links {
+			if _, err := url.ParseRequestURI(l.URL); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "link inválido na posição " + strconv.Itoa(i)})
+				return
+			}
+		}
+		links := toModelLinks(in.Links)
+
+		// Se vier arquivo, envia ao file-server e adiciona ao Links
+		if fh, err := c.FormFile("file"); err == nil {
+			filename := filepath.Base(fh.Filename)
+			dir := c.PostForm("dir") // ex: "AC" ou "DC/MODELOX"
+			linkModule := strings.TrimSpace(c.PostForm("linkModule"))
+			linkDesc := strings.TrimSpace(c.PostForm("linkDescription"))
+			if linkModule == "" { linkModule = "default" }
+			if linkDesc == "" { linkDesc = "Firmware" }
+
+			f, err := fh.Open()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao abrir arquivo"})
+				return
+			}
+			defer f.Close()
+
+			publicURL, _, _, _, err := h.putToFileServer(c.Request.Context(), filename, dir, f)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "upload falhou: " + err.Error()})
+				return
+			}
+
+			links = append(links, models.FirmwareLink{
+				Module:      linkModule,
+				Description: linkDesc,
+				URL:         publicURL,
+			})
+		}
+
+		rel := &models.Release{
+			Version:         in.Version,
+			PreviousVersion: in.PreviousVersion,
+			OTA:             in.OTA,
+			OTAObs:          in.OTAObs,
+			ReleaseDate:     in.ReleaseDate,
+			ImportantNote:   in.ImportantNote,
+			ProductCategory: in.ProductCategory,
+			ProductName:     in.ProductName,
+			Status:          st,
+			Modules:         toModelModules(in.Modules),
+			Entries:         toModelEntries(in.Entries),
+			Links:           links,
+			CreatedByUserID: userID,
+		}
+		out, err := h.Svc.Create(rel)
+		if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return }
+		c.JSON(http.StatusCreated, toReleaseResponse(out))
+		return
 	}
 
-	out, err := h.Svc.Create(rel)
-	if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return }
-	c.JSON(http.StatusCreated, toReleaseResponse(out))
+	c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "use application/json ou multipart/form-data"})
 }
 
 
