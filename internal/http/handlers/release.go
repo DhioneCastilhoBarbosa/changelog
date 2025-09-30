@@ -289,41 +289,34 @@ func (h ReleaseHandler) makePublicURL(dir, filename string) string {
 
 // salva no FS local: <FileLocalRoot>/firmware[/dir]/filename
 func (h ReleaseHandler) saveToLocal(filename, dir string, r io.Reader) (publicURL string, size int64, err error) {
-    if h.FileLocalRoot == "" {
-        return "", 0, fmt.Errorf("FileLocalRoot não configurado")
-    }
-    root := strings.TrimRight(h.FileLocalRoot, "/")
+	if h.FileLocalRoot == "" { return "", 0, fmt.Errorf("FileLocalRoot não configurado") }
 
-    // dir opcional: "AC", "DC/MODELOX", etc.
-    if dir != "" {
-        if dir, err = sanitizeRel(dir); err != nil {
-            return "", 0, err
-        }
-    }
+	root := strings.TrimRight(h.FileLocalRoot, "/")
 
-    // Base já é a pasta /firmware
-    destDir := root
-    if dir != "" {
-        destDir = filepath.Join(destDir, filepath.FromSlash(dir))
-    }
-    if err := os.MkdirAll(destDir, 0o775); err != nil {
-        return "", 0, fmt.Errorf("falha ao criar diretório: %w", err)
-    }
+	if dir != "" {
+		if dir, err = sanitizeRel(dir); err != nil { return "", 0, err }
+	}
 
-    destPath := filepath.Join(destDir, filepath.Base(filename))
-    f, err := os.Create(destPath)
-    if err != nil {
-        return "", 0, fmt.Errorf("falha ao criar arquivo: %w", err)
-    }
-    defer f.Close()
+	destDir := root
+	if dir != "" {
+		destDir = filepath.Join(destDir, filepath.FromSlash(dir))
+	}
+	if err := os.MkdirAll(destDir, 0o775); err != nil {
+		return "", 0, fmt.Errorf("falha ao criar diretório: %w", err)
+	}
 
-    n, err := io.Copy(f, r)
-    if err != nil {
-        return "", 0, fmt.Errorf("falha ao gravar arquivo: %w", err)
-    }
+	destPath := filepath.Join(destDir, filepath.Base(filename))
+	f, err := os.Create(destPath)
+	if err != nil { return "", 0, fmt.Errorf("falha ao criar arquivo: %w", err) }
+	defer func() { _ = f.Sync(); _ = f.Close() }()
 
-    return h.makePublicURL(dir, filepath.Base(filename)), n, nil
+	n, err := io.Copy(f, r)
+	if err != nil { return "", 0, fmt.Errorf("falha ao gravar arquivo: %w", err) }
+	if n == 0 { return "", 0, fmt.Errorf("arquivo vazio: %s", destPath) }
+
+	return h.makePublicURL(dir, filepath.Base(filename)), n, nil
 }
+
 
 
 
