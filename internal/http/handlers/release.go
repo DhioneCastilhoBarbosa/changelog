@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,13 +31,22 @@ import (
 */
 
 type ReleaseHandler struct {
-    Svc *service.ReleaseService
-    // Base local que corresponde a /firmware (não adicione “firmware” depois)
-    // Ex.: "/files/firmware"  (montado via volume)
-    FileLocalRoot string
-    FilePublicBase string // ex.: "https://file-serve.api-castilho.com.br/firmware/"
-    HTTPTimeout time.Duration
+	Svc *service.ReleaseService
+
+	// URLs públicas (para devolver ao cliente)
+	FilePublicBase string // ex: "https://files.seudominio.com/firmware"
+
+	// WebDAV (Nginx do servidor de arquivos)
+	FileServerBase string // ex: "https://files.seudominio.com/firmware"  (sem barra final)
+	FileServerUser string // ex: "uploader"
+	FileServerPass string // ex: "vmx30032"
+
+	// Local file system root for firmware uploads
+	FileLocalRoot string // ex: "/var/www/files/firmware"
+
+	HTTPTimeout time.Duration
 }
+
 
 type FirmwareLinkDTO struct {
 	Module      string `json:"module" binding:"required"`
@@ -65,6 +78,8 @@ type CreateReleaseDTO struct {
 	ProductCategory string      `json:"productCategory"`
 	ProductName     string      `json:"productName"`
 }
+
+type deleteFileDTO struct{ URL string `json:"url"`; Path string `json:"path"` }
 
 /*
 =========================
@@ -218,6 +233,91 @@ func toReleaseResponse(m *models.Release) ReleaseResponse {
 
 /* ===== Helpers de upload ===== */
 
+// monta destino DAV: <FileServerBase>/<dir>/<filename>
+func (h ReleaseHandler) davDest(dir, filename string) (string, error) {
+    if h.FileServerBase == "" { return "", fmt.Errorf("file-server não configurado") }
+    base := strings.TrimRight(h.FileServerBase, "/") + "/"
+    if dir != "" {
+        s, err := sanitizeRel(dir)
+        if err != nil { return "", err }
+        if s != "" { base += url.PathEscape(s) + "/" }
+    }
+    return base + url.PathEscape(filepath.Base(filename)), nil
+}
+
+// PUT para o servidor de arquivos via WebDAV
+func (h ReleaseHandler) davPut(ctx context.Context, filename, dir string, r io.Reader) (publicURL string, size int64, err error) {
+    dest, err := h.davDest(dir, filename)
+    if err != nil { return "", 0, err }
+
+    mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
+    if mt == "" { mt = "application/octet-stream" }
+
+    hh := sha256.New()
+    cr := &countReader{R: r}
+    body := io.TeeReader(cr, hh)
+
+    to := h.HTTPTimeout
+    if to == 0 { to = 120 * time.Second }
+
+    req, err := http.NewRequestWithContext(ctx, http.MethodPut, dest, body)
+    if err != nil { return "", 0, err }
+    req.Header.Set("Content-Type", mt)
+    if h.FileServerUser != "" {
+        req.SetBasicAuth(h.FileServerUser, h.FileServerPass)
+    }
+
+    resp, err := (&http.Client{Timeout: to}).Do(req)
+    if err != nil { return "", 0, err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+        return "", 0, fmt.Errorf("file-server %d: %s", resp.StatusCode, string(b))
+    }
+
+    // URL pública final
+    pub := strings.TrimRight(h.FilePublicBase, "/") + "/"
+    if dir != "" {
+        s, _ := sanitizeRel(dir)
+        if s != "" { pub += url.PathEscape(s) + "/" }
+    }
+    pub += url.PathEscape(filepath.Base(filename))
+    _ = hex.EncodeToString(hh.Sum(nil)) // disponível p/ log
+    return pub, cr.N, nil
+}
+
+// DELETE no servidor de arquivos. Aceita URL pública completa OU caminho "AC/arquivo.bin".
+func (h ReleaseHandler) davDelete(ctx context.Context, publicOrPath string) error {
+    to := h.HTTPTimeout
+    if to == 0 { to = 120 * time.Second }
+
+    target := publicOrPath
+    if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+        if h.FileServerBase == "" { return fmt.Errorf("file-server não configurado") }
+        base := strings.TrimRight(h.FileServerBase, "/")
+        p := strings.ReplaceAll(publicOrPath, "\\", "/")
+        p2, err := sanitizeRel(p)
+        if err != nil { return err }
+        // OBS: p2 já é “AC/arquivo.bin”; não re-escape diretórios separadamente aqui
+        target = base + "/" + strings.ReplaceAll(url.PathEscape(p2), "%2F", "/")
+    }
+
+    req, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
+    if err != nil { return err }
+    if h.FileServerUser != "" {
+        req.SetBasicAuth(h.FileServerUser, h.FileServerPass)
+    }
+    resp, err := (&http.Client{Timeout: to}).Do(req)
+    if err != nil { return err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotFound {
+        b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+        return fmt.Errorf("file-server %d: %s", resp.StatusCode, string(b))
+    }
+    return nil
+}
+
+
 func sanitizeRel(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" { return "", nil }
@@ -233,50 +333,6 @@ type countReader struct{ R io.Reader; N int64 }
 func (c *countReader) Read(p []byte) (int, error) {
 	n, err := c.R.Read(p); c.N += int64(n); return n, err
 }
-
-/*func (h ReleaseHandler) putToFileServer(ctx context.Context, filename, dir string, r io.Reader) (publicURL, mimeType, sha256sum string, size int64, err error) {
-	if h.FileServerBase == "" {
-		return "", "", "", 0, fmt.Errorf("file-server não configurado")
-	}
-	base := h.FileServerBase
-	if !strings.HasSuffix(base, "/") { base += "/" }
-
-	if dir != "" {
-		if dir, err = sanitizeRel(dir); err != nil { return "", "", "", 0, err }
-	}
-
-	dest := base
-	if dir != "" { dest += url.PathEscape(dir) + "/" }
-	dest += url.PathEscape(filepath.Base(filename))
-
-	mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
-	if mt == "" { mt = "application/octet-stream" }
-
-	hh := sha256.New()
-	cr := &countReader{R: r}
-	body := io.TeeReader(cr, hh)
-
-	to := h.HTTPTimeout
-	if to == 0 { to = 120 * time.Second }
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, dest, body)
-	if err != nil { return "", "", "", 0, err }
-	req.Header.Set("Content-Type", mt)
-	if h.FileServerUser != "" {
-		req.SetBasicAuth(h.FileServerUser, h.FileServerPass)
-	}
-
-	resp, err := (&http.Client{Timeout: to}).Do(req)
-	if err != nil { return "", "", "", 0, err }
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", "", "", 0, fmt.Errorf("file-server %d: %s", resp.StatusCode, string(b))
-	}
-
-	return dest, mt, "sha256:"+hex.EncodeToString(hh.Sum(nil)), cr.N, nil
-}*/
 
 // constrói URL pública com base + dir + filename
 func (h ReleaseHandler) makePublicURL(dir, filename string) string {
@@ -424,11 +480,11 @@ func (h ReleaseHandler) Create(c *gin.Context) {
 			}
 			defer f.Close()
 
-			publicURL, _, err := h.saveToLocal(filename, dir, f)
+			publicURL, _, err := h.davPut(c.Request.Context(), filename, dir, f)
 			if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "upload falhou: " + err.Error()})
-					return
-			}
+    		c.JSON(http.StatusBadGateway, gin.H{"error": "upload falhou: " + err.Error()})
+    		return
+}
 
 
 			links = append(links, models.FirmwareLink{
@@ -553,12 +609,48 @@ func (h ReleaseHandler) Update(c *gin.Context) {
 }
 
 
-
 func (h ReleaseHandler) Delete(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
-	if err := h.Svc.Delete(uint(id)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.Status(http.StatusNoContent)
+    id, _ := strconv.Atoi(c.Param("id"))
+
+    // 4.1 buscar release para obter os links (se existir)
+    rel, _ := h.Svc.Get(uint(id)) // se errar aqui, seguimos com a deleção do banco
+
+    // 4.2 tentar apagar os arquivos remotos ligados a este release
+    if rel != nil && len(rel.Links) > 0 {
+        for _, lk := range rel.Links {
+            u := strings.TrimSpace(lk.URL)
+            if u == "" { continue }
+
+            // regra: só apagar o que estiver sob a sua base pública (evita deletar URLs de terceiros)
+            basePub := strings.TrimRight(h.FilePublicBase, "/") + "/"
+            if strings.HasPrefix(u, basePub) {
+                // Delete pela URL pública direta
+                _ = h.davDelete(c.Request.Context(), u)
+            }
+        }
+    }
+
+    // 4.3 deletar o release no serviço
+    if err := h.Svc.Delete(uint(id)); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.Status(http.StatusNoContent)
+}
+
+
+
+func (h ReleaseHandler) DeleteFile(c *gin.Context) {
+    var in deleteFileDTO
+    if err := c.ShouldBindJSON(&in); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+    }
+    v := strings.TrimSpace(in.URL)
+    if v == "" { v = strings.TrimSpace(in.Path) }
+    if v == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "informe url ou path"}); return }
+
+    if err := h.davDelete(c.Request.Context(), v); err != nil {
+        c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()}); return
+    }
+    c.Status(http.StatusNoContent)
 }

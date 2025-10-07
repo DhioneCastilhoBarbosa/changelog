@@ -1,8 +1,9 @@
-// internal/http/router/router.go
 package router
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -16,66 +17,85 @@ import (
 )
 
 func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
-	r := gin.Default()
+    r := gin.Default()
 
-	// aceita uploads grandes (ex.: até 512 MiB)
-	r.MaxMultipartMemory = 512 << 20 // 512 MiB
+    // aceita uploads grandes (ex.: até 512 MiB)
+    r.MaxMultipartMemory = 512 << 20 // 512 MiB
 
-	// CORS
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"}, // ajuste se necessário
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
+    // CORS
+    r.Use(cors.New(cors.Config{
+        AllowOrigins:     []string{"*"},
+        AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+        AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
+        ExposeHeaders:    []string{"Content-Length"},
+        AllowCredentials: true,
+        MaxAge:           12 * time.Hour,
+    }))
 
-	// repos
-	relRepo := repository.NewReleaseRepository(db)
-	userRepo := repository.NewUserRepository(db)
+    // repos
+    relRepo := repository.NewReleaseRepository(db)
+    userRepo := repository.NewUserRepository(db)
 
-	// services
-	relSvc := service.NewReleaseService(relRepo)
-	authSvc := service.NewAuthService(userRepo, jwtSecret)
-	userSvc := service.NewUserService(userRepo)
+    // services
+    relSvc := service.NewReleaseService(relRepo)
+    authSvc := service.NewAuthService(userRepo, jwtSecret)
+    userSvc := service.NewUserService(userRepo)
 
-	// handlers
-	auth := handlers.AuthHandler{Svc: authSvc}
-	rel := handlers.ReleaseHandler{
-    Svc:            relSvc,
-    FileLocalRoot:  envOr("FILE_LOCAL_ROOT", "/files/firmware"),
-    FilePublicBase: envOr("FILE_PUBLIC_BASE", "https://file-serve.api-castilho.com.br/firmware/"),
-}
+    // handlers
+    auth := handlers.AuthHandler{Svc: authSvc}
 
-	user := handlers.UserHandler{Svc: userSvc}
+    rel := handlers.ReleaseHandler{
+        Svc:            relSvc,
+        FilePublicBase: strings.TrimRight(envOr("FILE_PUBLIC_BASE", "https://files.seudominio.com/firmware"), "/"),
+        FileServerBase: strings.TrimRight(envOr("FILE_SERVER_BASE", "https://files.seudominio.com/firmware"), "/"),
+        FileServerUser: envOr("FILE_SERVER_USER", "uploader"),
+        FileServerPass: envOr("FILE_SERVER_PASS", ""),
+        HTTPTimeout:    envDur("HTTP_TIMEOUT", 120*time.Second), // aceita "120s" ou "120"
+    }
 
-	// auth pública
-	r.POST("/api/auth/login", auth.Login)
-	r.POST("/api/users", user.Create)
+    user := handlers.UserHandler{Svc: userSvc}
 
-	// público
-	r.GET("/api/releases", rel.List)
-	r.GET("/api/releases/:id", rel.Get)
+    // auth pública
+    r.POST("/api/auth/login", auth.Login)
+    r.POST("/api/users", user.Create)
 
-	// protegido
-	protected := r.Group("/api")
-	protected.Use(middleware.JWT(jwtSecret))
-	{
-		ed := protected.Group("/releases")
-		ed.Use(middleware.RequireRole("admin", "editor"))
-		// Create já aceita JSON ou multipart com upload (campo "data" + "file")
-		ed.POST("", rel.Create)
-		ed.PUT("/:id", rel.Update)
-		ed.DELETE("/:id", middleware.RequireRole("admin"), rel.Delete)
-	}
+    // público
+    r.GET("/api/releases", rel.List)
+    r.GET("/api/releases/:id", rel.Get)
 
-	return r
+    // protegido
+    protected := r.Group("/api")
+    protected.Use(middleware.JWT(jwtSecret))
+    {
+        ed := protected.Group("/releases")
+        ed.Use(middleware.RequireRole("admin", "editor"))
+
+        // Create aceita JSON ou multipart (campo "data" + "file"), e usa DAV PUT
+        ed.POST("", rel.Create)
+        ed.PUT("/:id", rel.Update)
+
+        // Apaga release; antes tenta DAV DELETE para cada link do release
+        ed.DELETE("/:id", middleware.RequireRole("admin"), rel.Delete)
+
+        // Apagar um arquivo avulso do file-server (URL ou path em JSON)
+        ed.DELETE("/file", middleware.RequireRole("admin"), rel.DeleteFile)
+    }
+
+    return r
 }
 
 func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
+    if v := os.Getenv(k); v != "" {
+        return v
+    }
+    return def
+}
+
+// HTTP_TIMEOUT: "120s" OU "120" (segundos)
+func envDur(k string, def time.Duration) time.Duration {
+    v := os.Getenv(k)
+    if v == "" { return def }
+    if d, err := time.ParseDuration(v); err == nil { return d }
+    if n, err := strconv.Atoi(v); err == nil { return time.Duration(n) * time.Second }
+    return def
 }
