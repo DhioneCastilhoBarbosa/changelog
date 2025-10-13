@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -12,31 +13,44 @@ import (
 
 func JWT(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Aceita "Authorization: Bearer <tok>" com case-insensitive no prefixo
 		h := c.GetHeader("Authorization")
-		if !strings.HasPrefix(h, "Bearer ") {
+		if h == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
 			return
 		}
-		tok := strings.TrimPrefix(h, "Bearer ")
+		parts := strings.Fields(h)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+			return
+		}
+		tok := parts[1]
+
 		claims := jwt.MapClaims{}
-		_, err := jwt.ParseWithClaims(tok, claims, func(token *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
-		})
-		if err != nil {
+
+		// Valida assinatura + algoritmo + tolerância de relógio
+		token, err := jwt.ParseWithClaims(
+			tok,
+			claims,
+			func(token *jwt.Token) (interface{}, error) { return []byte(secret), nil },
+			jwt.WithLeeway(5*time.Second),
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		)
+		if err != nil || !token.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
 
-		// role
+		// role (mantém comportamento atual)
 		role, _ := claims["role"].(string)
-		if role == "" {
-			// opcional: negar sem role
-			// c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error":"missing role"})
-			// return
-		}
+		// opcional: negar sem role
+		// if role == "" {
+		// 	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error":"missing role"})
+		// 	return
+		// }
 		c.Set("role", role)
 
-		// uid pode vir como float64 (default do JSON) ou string
+		// uid pode vir como float64 ou string (mantém sua lógica)
 		var userID uint
 		switch v := claims["uid"].(type) {
 		case float64:
@@ -44,7 +58,6 @@ func JWT(secret string) gin.HandlerFunc {
 				userID = uint(v)
 			}
 		case string:
-			// tentar converter
 			if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 				userID = uint(n)
 			}
@@ -53,7 +66,9 @@ func JWT(secret string) gin.HandlerFunc {
 		if userID == 0 {
 			switch v := claims["sub"].(type) {
 			case float64:
-				userID = uint(v)
+				if v > 0 {
+					userID = uint(v)
+				}
 			case string:
 				if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 					userID = uint(n)
@@ -65,6 +80,9 @@ func JWT(secret string) gin.HandlerFunc {
 			return
 		}
 		c.Set("userID", userID)
+
+		// disponibiliza claims completos se precisar em handlers
+		c.Set("claims", claims)
 
 		c.Next()
 	}
