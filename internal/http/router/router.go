@@ -24,7 +24,8 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
 
     // CORS
     r.Use(cors.New(cors.Config{
-        AllowOrigins:     []string{"*"},
+        AllowOrigins:     []string{"http://localhost:5173",
+    "https://changelog.intelbras-cve-pro.com.br"},
         AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
         AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
         ExposeHeaders:    []string{"Content-Length"},
