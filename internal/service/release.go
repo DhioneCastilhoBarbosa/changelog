@@ -23,6 +23,8 @@ type ReleaseQuery struct {
 	DateTo   *time.Time
 }
 
+
+
 func (s *ReleaseService) Create(in *models.Release) (*models.Release, error) {
 	if in.Version == "" {
 		return nil, errors.New("version é obrigatória")
@@ -60,3 +62,6 @@ func (s *ReleaseService) UpdateFull(id uint, base models.Release, modules []mode
 func (s *ReleaseService) Delete(id uint) error {
 	return s.repo.Delete(id)
 }
+
+
+
