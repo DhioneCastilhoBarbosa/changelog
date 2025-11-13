@@ -37,11 +37,14 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
     // repos
     relRepo := repository.NewReleaseRepository(db)
     userRepo := repository.NewUserRepository(db)
+    approvalRepo := repository.NewApprovalRepository(db)
+
 
     // services
     relSvc := service.NewReleaseService(relRepo)
     authSvc := service.NewAuthService(userRepo, jwtSecret)
     userSvc := service.NewUserService(userRepo)
+    approvalSvc := service.NewApprovalService(approvalRepo)
 
     // handlers
     auth := handlers.AuthHandler{Svc: authSvc}
@@ -57,6 +60,15 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
 
     user := handlers.UserHandler{Svc: userSvc}
 
+    approvalHandler := handlers.ApprovalHandler{
+	Svc:            approvalSvc,
+	FilePublicBase: strings.TrimRight(envOr("FILE_PUBLIC_BASE_APPROVALS", "https://files.seudominio.com/approvals"), "/"),
+        FileServerBase: strings.TrimRight(envOr("FILE_SERVER_BASE_APPROVALS", "https://files.seudominio.com/approvals"), "/"),
+        FileServerUser: envOr("FILE_SERVER_USER", "uploader"),
+        FileServerPass: envOr("FILE_SERVER_PASS", ""),
+        HTTPTimeout:    envDur("HTTP_TIMEOUT", 120*time.Second), // aceita "120s" ou "120"
+}
+
     // auth pública
     r.POST("/api/auth/login", auth.Login)
     r.POST("/api/users", user.Create)
@@ -70,6 +82,7 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
     protected.Use(middleware.JWT(jwtSecret))
     {
         ed := protected.Group("/releases")
+        approval := protected.Group("/v1")
         ed.Use(middleware.RequireRole("admin", "editor"))
 
         // Create aceita JSON ou multipart (campo "data" + "file"), e usa DAV PUT
@@ -81,6 +94,11 @@ func Setup(db *gorm.DB, jwtSecret string) *gin.Engine {
 
         // Apagar um arquivo avulso do file-server (URL ou path em JSON)
         ed.DELETE("/file", middleware.RequireRole("admin"), rel.DeleteFile)
+
+        approval.POST("", approvalHandler.Create)
+        approval.GET("/approvals", approvalHandler.List)
+        approval.GET("/approvals/:id", approvalHandler.Get)
+        approval.DELETE("/approvals/:id", approvalHandler.Delete)
     }
 
     return r
